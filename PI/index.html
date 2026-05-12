@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fossibot Monitor</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap');
+
+  :root {
+    --bg:        #0d0f12;
+    --surface:   #141720;
+    --border:    #1e2330;
+    --green:     #00e676;
+    --green-dim: #00e67622;
+    --amber:     #ffab00;
+    --amber-dim: #ffab0022;
+    --red:       #ff1744;
+    --blue:      #448aff;
+    --blue-dim:  #448aff18;
+    --text:      #e8eaf0;
+    --muted:     #5a6080;
+    --mono:      'Share Tech Mono', monospace;
+    --sans:      'Exo 2', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    padding: 20px;
+  }
+
+  /* scanline overlay */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0,0,0,.08) 2px, rgba(0,0,0,.08) 4px
+    );
+    pointer-events: none;
+    z-index: 1000;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 16px;
+  }
+
+  .brand {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--muted);
+    letter-spacing: .15em;
+    text-transform: uppercase;
+  }
+  .brand span { color: var(--green); }
+
+  .conn-badge {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 12px;
+    color: var(--muted); letter-spacing: .1em;
+  }
+  .conn-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted);
+    transition: background .4s;
+  }
+  .conn-dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .conn-dot.live { animation: pulse 2s infinite; }
+
+  @keyframes pulse {
+    0%,100% { box-shadow: 0 0 6px var(--green); }
+    50%      { box-shadow: 0 0 16px var(--green); }
+  }
+
+  /* ── SOC bar ── */
+  .soc-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin-bottom: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .soc-header {
+    display: flex; align-items: baseline; gap: 12px;
+    margin-bottom: 16px;
+  }
+  .soc-label { font-size: 11px; color: var(--muted); letter-spacing: .12em; text-transform: uppercase; }
+  .soc-value {
+    font-family: var(--mono); font-size: 48px; font-weight: 400;
+    color: var(--green); line-height: 1;
+  }
+  .soc-pct { font-size: 22px; color: var(--muted); }
+
+  .soc-track {
+    height: 8px; background: var(--border); border-radius: 4px; overflow: hidden;
+  }
+  .soc-fill {
+    height: 100%; border-radius: 4px;
+    background: linear-gradient(90deg, #00c853, #00e676);
+    transition: width .8s cubic-bezier(.4,0,.2,1), background .4s;
+    width: 0%;
+  }
+  .soc-fill.low    { background: linear-gradient(90deg, #e65100, var(--red)); }
+  .soc-fill.medium { background: linear-gradient(90deg, #f57f17, var(--amber)); }
+
+  .soc-meta {
+    display: flex; gap: 24px; margin-top: 14px;
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+  }
+  .soc-meta span { color: var(--text); }
+
+  /* ── power flow grid ── */
+  .flow-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .flow-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .flow-card.input  { border-color: #1e3028; background: #0d1510; }
+  .flow-card.output { border-color: #1e2038; background: #0d1020; }
+  .flow-card.active-in  { border-color: #00e67640; }
+  .flow-card.active-out { border-color: #448aff40; }
+
+  .flow-icon-label {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 11px; color: var(--muted); letter-spacing: .1em; text-transform: uppercase;
+  }
+  .flow-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+  }
+  .input  .flow-dot { background: var(--green); }
+  .output .flow-dot { background: var(--blue); }
+
+  .flow-value {
+    font-family: var(--mono); font-size: 28px; color: var(--text);
+    line-height: 1;
+  }
+  .flow-value.active { color: var(--green); }
+  .flow-value.active-out { color: var(--blue); }
+  .flow-unit { font-size: 13px; color: var(--muted); margin-left: 3px; }
+
+  .flow-sub {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    margin-top: 2px;
+  }
+
+  /* ── stats row ── */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .stat-label { font-size: 10px; color: var(--muted); letter-spacing: .12em; text-transform: uppercase; margin-bottom: 6px; }
+  .stat-value { font-family: var(--mono); font-size: 22px; color: var(--text); }
+  .stat-unit  { font-size: 11px; color: var(--muted); margin-left: 2px; }
+
+  /* ── switches row ── */
+  .switches-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .switch-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    transition: border-color .3s, background .3s;
+  }
+  .switch-card.on {
+    border-color: #00e67640;
+    background: var(--green-dim);
+  }
+  .switch-label { font-size: 10px; color: var(--muted); letter-spacing: .1em; text-transform: uppercase; }
+  .switch-indicator {
+    width: 32px; height: 18px; border-radius: 9px;
+    background: var(--border);
+    position: relative;
+    transition: background .3s;
+  }
+  .switch-indicator::after {
+    content: '';
+    position: absolute; top: 3px; left: 3px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--muted);
+    transition: transform .3s, background .3s;
+  }
+  .switch-card.on .switch-indicator { background: #00e67660; }
+  .switch-card.on .switch-indicator::after {
+    transform: translateX(14px);
+    background: var(--green);
+  }
+
+  /* ── footer ── */
+  footer {
+    margin-top: 20px;
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    display: flex; justify-content: space-between; align-items: center;
+    border-top: 1px solid var(--border); padding-top: 12px;
+  }
+
+  #last-update { color: var(--muted); }
+  #age-warning { color: var(--amber); display: none; }
+
+  /* responsive */
+  @media (max-width: 600px) {
+    .flow-grid { grid-template-columns: 1fr; }
+    .stats-row { grid-template-columns: 1fr 1fr; }
+    .switches-row { grid-template-columns: repeat(2, 1fr); }
+    .soc-value { font-size: 36px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand"><span>FOSSIBOT</span> · MONITOR</div>
+  <div class="conn-badge">
+    <div class="conn-dot" id="conn-dot"></div>
+    <span id="conn-label">WAITING</span>
+  </div>
+</header>
+
+<!-- SOC -->
+<div class="soc-section">
+  <div class="soc-header">
+    <div>
+      <div class="soc-label">Battery Level</div>
+      <div><span class="soc-value" id="soc-val">--</span><span class="soc-pct">%</span></div>
+    </div>
+  </div>
+  <div class="soc-track"><div class="soc-fill" id="soc-fill"></div></div>
+  <div class="soc-meta">
+    Runtime: <span id="runtime">--</span>&nbsp;&nbsp;|&nbsp;&nbsp;
+    Mode: <span id="charge-state">--</span>&nbsp;&nbsp;|&nbsp;&nbsp;
+    Temp: <span id="batt-temp">--</span>
+  </div>
+</div>
+
+<!-- Power flow -->
+<div class="flow-grid">
+  <div class="flow-card input" id="ac-in-card">
+    <div class="flow-icon-label"><div class="flow-dot"></div>AC INPUT</div>
+    <div class="flow-value" id="ac-in-val">--<span class="flow-unit">W</span></div>
+    <div class="flow-sub">Charging power</div>
+  </div>
+  <div class="flow-card output" id="ac-out-card">
+    <div class="flow-icon-label"><div class="flow-dot"></div>AC OUTPUT</div>
+    <div class="flow-value" id="ac-out-val">--<span class="flow-unit">W</span></div>
+    <div class="flow-sub">Load power</div>
+  </div>
+  <div class="flow-card input" id="pv-card">
+    <div class="flow-icon-label"><div class="flow-dot"></div>SOLAR INPUT</div>
+    <div class="flow-value" id="pv-val">--<span class="flow-unit">W</span></div>
+    <div class="flow-sub" id="pv-kwh">Total: -- kWh</div>
+  </div>
+  <div class="flow-card output" id="dc-usb-card">
+    <div class="flow-icon-label"><div class="flow-dot"></div>DC + USB</div>
+    <div class="flow-value" id="dc-val">--<span class="flow-unit">W</span></div>
+    <div class="flow-sub" id="usb-sub">USB: -- W</div>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="stat-label">Total Input</div>
+    <div class="stat-value" id="total-in">--<span class="stat-unit">W</span></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Total Output</div>
+    <div class="stat-value" id="total-out">--<span class="stat-unit">W</span></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-label">Inverter Temp</div>
+    <div class="stat-value" id="inv-temp">--<span class="stat-unit">°C</span></div>
+  </div>
+</div>
+
+<!-- Switches -->
+<div class="switches-row">
+  <div class="switch-card" id="sw-ac">
+    <div class="switch-label">AC</div>
+    <div class="switch-indicator"></div>
+  </div>
+  <div class="switch-card" id="sw-dc">
+    <div class="switch-label">DC</div>
+    <div class="switch-indicator"></div>
+  </div>
+  <div class="switch-card" id="sw-usb">
+    <div class="switch-label">USB</div>
+    <div class="switch-indicator"></div>
+  </div>
+  <div class="switch-card" id="sw-led">
+    <div class="switch-label">LED</div>
+    <div class="switch-indicator"></div>
+  </div>
+</div>
+
+<footer>
+  <div>
+    <span id="last-update">No data yet</span>
+    <span id="age-warning"> · DATA STALE</span>
+  </div>
+  <div>REFRESH 2s</div>
+</footer>
+
+<script>
+const API = '/flat';
+const REFRESH_MS = 2000;
+
+function fmtRuntime(minutes) {
+  if (minutes === null || minutes === undefined) return '--';
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function setVal(id, val, fallback='--') {
+  const el = document.getElementById(id);
+  if (el) el.textContent = (val !== null && val !== undefined) ? val : fallback;
+}
+
+function setSwitch(id, on) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.toggle('on', !!on);
+}
+
+function setFlowActive(cardId, valId, active, outMode=false) {
+  const card = document.getElementById(cardId);
+  const val  = document.getElementById(valId);
+  if (!card || !val) return;
+  card.classList.toggle(outMode ? 'active-out' : 'active-in', active);
+  val.classList.toggle(outMode ? 'active-out' : 'active', active);
+}
+
+async function refresh() {
+  try {
+    const res  = await fetch(API);
+    const data = await res.json();
+
+    // Connection badge
+    const connected = data._connected;
+    const dot   = document.getElementById('conn-dot');
+    const label = document.getElementById('conn-label');
+    dot.classList.toggle('live', connected);
+    label.textContent = connected ? 'LIVE' : 'DISCONNECTED';
+
+    if (!connected) return;
+
+    // SOC
+    const soc = data.soc;
+    document.getElementById('soc-val').textContent = soc ?? '--';
+    const fill = document.getElementById('soc-fill');
+    fill.style.width = (soc ?? 0) + '%';
+    fill.className = 'soc-fill' +
+      (soc < 20 ? ' low' : soc < 40 ? ' medium' : '');
+
+    // Runtime / state / temp
+    const runtime = data.runtime_minutes;
+    const state   = data.charge_discharge_state;
+    const stateLabel = state === 1 ? 'CHARGING' : state === 0 ? 'IDLE' : '--';
+    document.getElementById('runtime').textContent = fmtRuntime(runtime);
+    document.getElementById('charge-state').textContent = stateLabel;
+    document.getElementById('batt-temp').textContent =
+      data.battery_temp_max !== undefined ? data.battery_temp_max + '°C' : '--';
+
+    // Power flows
+    const acIn  = data.ac_input_power  ?? 0;
+    const acOut = data.ac_output_power ?? 0;
+    const pvIn  = data.pv_charge_power ?? 0;
+    const dcOut = data.dc_power        ?? 0;
+    const usbOut = data.usb_power      ?? 0;
+
+    document.getElementById('ac-in-val').innerHTML  = `${acIn}<span class="flow-unit">W</span>`;
+    document.getElementById('ac-out-val').innerHTML = `${acOut}<span class="flow-unit">W</span>`;
+    document.getElementById('pv-val').innerHTML     = `${pvIn}<span class="flow-unit">W</span>`;
+    document.getElementById('dc-val').innerHTML     = `${dcOut}<span class="flow-unit">W</span>`;
+    document.getElementById('pv-kwh').textContent   =
+      `Total: ${data.pv_total_kwh ?? '--'} kWh`;
+    document.getElementById('usb-sub').textContent  =
+      `USB: ${(usbOut / 10).toFixed(1)} W`;
+
+    setFlowActive('ac-in-card',  'ac-in-val',  acIn  > 0, false);
+    setFlowActive('ac-out-card', 'ac-out-val', acOut > 0, true);
+    setFlowActive('pv-card',     'pv-val',     pvIn  > 0, false);
+    setFlowActive('dc-usb-card', 'dc-val',     dcOut > 0 || usbOut > 0, true);
+
+    // Totals
+    document.getElementById('total-in').innerHTML  =
+      `${data.total_input_power ?? '--'}<span class="stat-unit">W</span>`;
+    document.getElementById('total-out').innerHTML =
+      `${data.total_output_power ?? '--'}<span class="stat-unit">W</span>`;
+    document.getElementById('inv-temp').innerHTML  =
+      `${data.inverter_temp ?? '--'}<span class="stat-unit">°C</span>`;
+
+    // Switches
+    setSwitch('sw-ac',  data.ac_switch);
+    setSwitch('sw-dc',  data.dc_switch);
+    setSwitch('sw-usb', data.usb_switch);
+    setSwitch('sw-led', data.led_state > 0);
+
+    // Footer
+    const age = data._seconds_since_update;
+    const now = new Date().toLocaleTimeString();
+    document.getElementById('last-update').textContent = `Updated ${now}`;
+    const stale = age !== null && age > 10;
+    document.getElementById('age-warning').style.display = stale ? 'inline' : 'none';
+
+  } catch (e) {
+    document.getElementById('conn-label').textContent = 'ERROR';
+    document.getElementById('conn-dot').classList.remove('live');
+    console.error('Fetch error:', e);
+  }
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>
