@@ -40,7 +40,7 @@
 # Configuration
 # ---------------------------------------------------------------------------
 
-$PiAddress                   = "fossibot.itmj.net"
+$PiAddress                   = "[pi-LAN-ip-address]"
 $Port                        = 8080
 $ApiUrl                      = "http://${PiAddress}:${Port}/flat"
 
@@ -57,10 +57,10 @@ $WhatIf                      = $false  # Set $true to simulate without shutting 
 # Email configuration
 # ---------------------------------------------------------------------------
 
-$SmtpServer         = "hypervhost"
+$SmtpServer         = "[smtp-server-name]"
 $SmtpPort           = 25
-$EmailTo            = "brett@church365.net"
-$EmailFrom          = "fossibot-ups@church365.net"
+$EmailTo            = "[to-email-address]"
+$EmailFrom          = "[from-email-address]"
 $EmailSubjectPrefix = "[Fossibot UPS]"
 
 # ---------------------------------------------------------------------------
