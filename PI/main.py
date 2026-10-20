@@ -87,15 +87,12 @@ def main():
             soc = device_state.get("soc")
             input_w = device_state.get("total_input_power")
             output_w = device_state.get("total_output_power")
-            pack_v = device_state.get("pack_voltage")
-            current = device_state.get("current_ma")
 
             if connected and soc is not None:
                 log.info(
                     f"[heartbeat] connected  SOC={soc}%  "
                     f"in={input_w}W  out={output_w}W  "
-                    f"pack={pack_v / 10 if pack_v is not None else '?'}V  "
-                    f"I={current}mA  age={age:.0f}s"
+                    f"age={age:.0f}s"
                 )
             elif connected:
                 log.info(f"[heartbeat] connected, no data yet  age={age}s")

@@ -68,6 +68,7 @@ dashboard is also included, served from the same port.
 
 5. Install as a systemd service:
    ```bash
+   sudo useradd --system --no-create-home --shell /usr/sbin/nologin fossibot
    sudo cp fossibot.service /etc/systemd/system/
    sudo systemctl daemon-reload
    sudo systemctl enable fossibot
