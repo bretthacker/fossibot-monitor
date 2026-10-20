@@ -67,8 +67,9 @@ def _parse_value(key, raw4):
             return val
 
     elif dtype == "version":
-        # Display as hex bytes reversed, dash-separated (matches app display)
-        return f"{raw4[0]:02x}-{raw4[1]:02x}-{raw4[2]:02x}-{raw4[3]:02x}"
+        # Display as hex bytes reversed, dash-separated (matches app display,
+        # e.g. bytes 26 12 25 10 -> "10-25-12-26")
+        return f"{raw4[3]:02x}-{raw4[2]:02x}-{raw4[1]:02x}-{raw4[0]:02x}"
 
     return None
 
@@ -82,7 +83,11 @@ def parse_frame(data: bytes) -> dict:
       - 2-byte trailer (appears to be a CRC-16; not yet verified)
     Frame is exactly 224 bytes: 6 header + 36 registers × 6 bytes + 2 = 224.
     The periodic push carries registers 1-5, 18-23 and 34-58 only; the BMS
-    detail and fault registers (6-12, 24-30) are not included.
+    detail and fault registers (6-12, 24-30) are not included, and the app
+    has no command to request them (confirmed from app-service.js: the only
+    outbound frame besides the ACK is a type 0x0c register *write*:
+    14 00 0c 00 08 00 <reg u16> <value 4 bytes> <CRC-16/MODBUS of the 6-byte
+    entry>). The bridge never sends writes.
     Returns dict of {field_name: value}.
     """
     if len(data) < 12:
