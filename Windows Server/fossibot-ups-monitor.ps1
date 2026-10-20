@@ -48,9 +48,12 @@ $ShutdownSocThreshold        = 20    # Shut down when SOC <= this %
 $InputLostSocThreshold       = 80    # Shut down on AC loss if SOC <= this %
 $WarnSocThreshold            = 30    # Log warning (no shutdown) at this %
 $InputLostGracePeriodSeconds = 30    # Seconds to wait before acting on AC loss
-$MaxOnBatteryMinutes         = 10    # Shut down after this long on battery REGARDLESS of SOC.
+$MaxOnBatteryMinutes         = 60    # Shut down after this long on battery REGARDLESS of SOC.
                                      # The BMS SOC can stick at 100% while the pack is empty
                                      # (seen 2026-10-19), so SOC alone can't be trusted.
+                                     # F1800 (~1kWh) at ~200W runs ~3.5h; shutdown takes up to
+                                     # 30 min, so 60 min leaves ample reserve. The clock keeps
+                                     # running if telemetry is lost after AC loss was seen.
 $MaxConsecutiveFailures      = 3     # API failures before logging an alert
 $MaxDisconnectedPolls        = 3     # Polls with the device disconnected before alerting
 $PollIntervalSeconds         = 30    # Seconds between polls
@@ -129,7 +132,12 @@ function Update-Problem {
             Write-UpsEvent -EventId $EventId -EntryType Warning -Message "Fossibot: $Name. $Detail"
             Send-UpsEmail -Subject "PROBLEM -- $Name" -Body ("$Detail" + "`r`n`r`n" +
                 "Since:  " + $p.Since.ToString("yyyy-MM-dd HH:mm:ss") + " ($mins min)" + "`r`n" +
-                "UPS shutdown protection is NOT active while this persists.")
+                $(if ($null -ne $script:inputLostSince) {
+                    "On battery since " + $script:inputLostSince.ToString('HH:mm:ss') +
+                    "; the host will still shut down at $MaxOnBatteryMinutes min on battery."
+                } else {
+                    "A NEW power loss would NOT be detected while this persists."
+                }))
             $p.LastAlert = $now
         }
     } elseif ($null -ne $p) {
@@ -140,6 +148,13 @@ function Update-Problem {
             Send-UpsEmail -Subject "RESOLVED -- $Name" -Body "$Name cleared after $mins minutes."
         }
     }
+}
+
+function Test-OnBatteryTimeout {
+    # True once AC has been absent for $MaxOnBatteryMinutes, measured from the
+    # first poll that saw AC loss (even if telemetry was lost afterwards)
+    return ($null -ne $script:inputLostSince) -and
+           (((Get-Date) - $script:inputLostSince).TotalMinutes -ge $MaxOnBatteryMinutes)
 }
 
 function Invoke-GracefulShutdown {
@@ -219,12 +234,13 @@ while (-not $shutdownInitiated) {
             Write-Warning "Fossibot bridge unreachable for $consecutiveFailures consecutive polls"
             Update-Problem -Name "Telemetry bridge unreachable" -Active $true -EventId 1002 `
                 -Detail "The Fossibot telemetry bridge at $ApiUrl has not answered for $consecutiveFailures polls. Last error: $_"
-            # Fail safe: if we were already on battery, don't keep running blind
-            if ($null -ne $inputLostSince) {
-                Invoke-GracefulShutdown -Reason "Telemetry bridge lost while on battery (AC absent since $($inputLostSince.ToString('HH:mm:ss')))"
-                $shutdownInitiated = $true
-                break
-            }
+        }
+        # Already on battery when telemetry was lost: keep the on-battery clock running
+        if (Test-OnBatteryTimeout) {
+            Invoke-GracefulShutdown -Reason ("AC absent since " + $inputLostSince.ToString('HH:mm:ss') +
+                " (>= $MaxOnBatteryMinutes min on battery); telemetry bridge unreachable since then")
+            $shutdownInitiated = $true
+            break
         }
         Start-Sleep -Seconds $PollIntervalSeconds
         continue
@@ -263,12 +279,13 @@ while (-not $shutdownInitiated) {
             Update-Problem -Name "Fossibot device not connected" -Active $true -EventId 1007 `
                 -Detail ("The bridge is up but the Fossibot has not sent data for " + $data._seconds_since_update +
                          " seconds. The power station may be off, faulted, or off WiFi.")
-            # Fail safe: if we were already on battery, don't keep running blind
-            if ($null -ne $inputLostSince) {
-                Invoke-GracefulShutdown -Reason "Fossibot telemetry lost while on battery (AC absent since $($inputLostSince.ToString('HH:mm:ss')))"
-                $shutdownInitiated = $true
-                break
-            }
+        }
+        # Already on battery when telemetry was lost: keep the on-battery clock running
+        if (Test-OnBatteryTimeout) {
+            Invoke-GracefulShutdown -Reason ("AC absent since " + $inputLostSince.ToString('HH:mm:ss') +
+                " (>= $MaxOnBatteryMinutes min on battery); Fossibot not reporting since then")
+            $shutdownInitiated = $true
+            break
         }
         Start-Sleep -Seconds $PollIntervalSeconds
         continue
