@@ -28,7 +28,7 @@ REGISTERS = {
     19: ("ac_input_power",          "uint16_t", "W",    "AC input (charging) power"),
     20: ("ac_output_power",         "uint16_t", "W",    "AC output (discharging) power"),
     21: ("output_voltage",          "uint16_t", "0.1V", "AC output voltage"),
-    22: ("output_frequency",        "uint16_t", "Hz",   "AC output frequency"),
+    22: ("output_frequency",        "uint16_t", "0.1Hz", "AC output frequency"),
     23: ("pv_charge_power",         "uint16_t", "W",    "Solar PV charging power"),
     24: ("inverter_temp",           "int16_t",  "°C",   "Inverter temperature"),
     25: ("mos_temp",                "int16_t",  "°C",   "MOS temperature"),

@@ -6,12 +6,14 @@
 #   GET /flat       - flat key->value dict (simpler for scripts)
 #   GET /status     - connection status only
 #   GET /health     - 200 OK if service is running, 503 if device disconnected
+#   GET /events     - recent events; ?since=<seq> returns only newer ones
 
 import json
 import logging
 import os
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 import config
 from state import device_state
@@ -53,6 +55,14 @@ class FossibotHandler(BaseHTTPRequestHandler):
                 "seconds_since_update": round(age, 1) if age is not None else None,
             })
 
+        elif path == "/events":
+            query = parse_qs(urlsplit(self.path).query)
+            try:
+                since = int(query.get("since", ["0"])[0])
+            except ValueError:
+                since = 0
+            self._json_response({"events": device_state.events(since)})
+
         elif path == "/health":
             if device_state.is_connected():
                 self._send(200, b"OK\n", "text/plain")
@@ -86,7 +96,9 @@ class HttpServer:
         self._server = None
 
     def start(self):
-        self._server = HTTPServer(("", config.HTTP_PORT), FossibotHandler)
+        # Threaded so one slow client can't block the monitor's polls
+        ThreadingHTTPServer.daemon_threads = True
+        self._server = ThreadingHTTPServer(("", config.HTTP_PORT), FossibotHandler)
         self._thread = threading.Thread(
             target=self._server.serve_forever,
             daemon=True,
@@ -99,6 +111,7 @@ class HttpServer:
         log.info(f"  Flat values:    http://<pi-ip>:{config.HTTP_PORT}/flat")
         log.info(f"  Status:         http://<pi-ip>:{config.HTTP_PORT}/status")
         log.info(f"  Health check:   http://<pi-ip>:{config.HTTP_PORT}/health")
+        log.info(f"  Events:         http://<pi-ip>:{config.HTTP_PORT}/events")
 
     def stop(self):
         if self._server:

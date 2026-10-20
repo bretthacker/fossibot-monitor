@@ -17,6 +17,10 @@ After=network-online.target
 Type=simple
 User=brett
 WorkingDirectory=/opt/fossibot
+# /run/fossibot (tmpfs) for optional raw capture — keeps writes off the SD card
+RuntimeDirectory=fossibot
+# Don't write .pyc files next to the code
+Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/bin/python3 /opt/fossibot/main.py
 Restart=always
 RestartSec=10

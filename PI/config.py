@@ -18,6 +18,14 @@ HTTP_PORT = 8080
 # How many seconds of silence before we consider the device disconnected
 DEVICE_TIMEOUT_SECONDS = 10
 
+# Number of events (connects, faults, AC loss, ...) kept in memory for /events
+EVENT_HISTORY = 500
+
+# If set, every raw byte received from the device is appended (hex, timestamped)
+# to this file. Use a tmpfs path such as /run/fossibot/raw.log so it doesn't
+# wear the SD card. Empty string disables capture.
+RAW_CAPTURE_PATH = ""
+
 # ACK frame sent back to device after every telemetry push
 # Reverse-engineered from app source
 ACK_FRAME = bytes.fromhex("0a001f00040004001f00")

@@ -79,8 +79,10 @@ def parse_frame(data: bytes) -> dict:
     Frame structure:
       - 6 byte header: e0 00 0b 00 da 00 (marker + length info)
       - N × 6 byte register entries: [addr_lo][addr_hi][val0][val1][val2][val3]
-      - No trailing CRC in the TCP stream (CRC is in the app's write path only)
-    Frame is exactly 224 bytes: 6 header + 36 registers × 6 bytes = 224.
+      - 2-byte trailer (appears to be a CRC-16; not yet verified)
+    Frame is exactly 224 bytes: 6 header + 36 registers × 6 bytes + 2 = 224.
+    The periodic push carries registers 1-5, 18-23 and 34-58 only; the BMS
+    detail and fault registers (6-12, 24-30) are not included.
     Returns dict of {field_name: value}.
     """
     if len(data) < 12:

@@ -48,8 +48,13 @@ $ShutdownSocThreshold        = 20    # Shut down when SOC <= this %
 $InputLostSocThreshold       = 80    # Shut down on AC loss if SOC <= this %
 $WarnSocThreshold            = 30    # Log warning (no shutdown) at this %
 $InputLostGracePeriodSeconds = 30    # Seconds to wait before acting on AC loss
+$MaxOnBatteryMinutes         = 10    # Shut down after this long on battery REGARDLESS of SOC.
+                                     # The BMS SOC can stick at 100% while the pack is empty
+                                     # (seen 2026-10-19), so SOC alone can't be trusted.
 $MaxConsecutiveFailures      = 3     # API failures before logging an alert
+$MaxDisconnectedPolls        = 3     # Polls with the device disconnected before alerting
 $PollIntervalSeconds         = 30    # Seconds between polls
+$AlertRepeatMinutes          = 60    # Re-send an ongoing problem alert this often
 
 $WhatIf                      = $false  # Set $true to simulate without shutting down
 
@@ -77,6 +82,8 @@ function Write-UpsEvent {
         # Silently ignore — requires admin rights; scheduled task as SYSTEM will succeed
     }
 }
+
+function Send-UpsEmail {
     param(
         [string]$Subject,
         [string]$Body
@@ -93,6 +100,45 @@ function Write-UpsEvent {
         Write-Host "Email sent: $Subject"
     } catch {
         Write-Warning "Failed to send email: $_"
+    }
+}
+
+# Tracks ongoing problems (bridge down, device disconnected) so each one
+# emails when it starts, repeats every $AlertRepeatMinutes, and emails
+# once more when it clears.
+$script:Problems = @{}
+
+function Update-Problem {
+    param(
+        [string]$Name,
+        [bool]$Active,
+        [int]$EventId,
+        [string]$Detail
+    )
+    $now = Get-Date
+    $p   = $script:Problems[$Name]
+
+    if ($Active) {
+        if ($null -eq $p) {
+            $p = @{ Since = $now; LastAlert = $null }
+            $script:Problems[$Name] = $p
+        }
+        $due = ($null -eq $p.LastAlert) -or (($now - $p.LastAlert).TotalMinutes -ge $AlertRepeatMinutes)
+        if ($due) {
+            $mins = [math]::Round(($now - $p.Since).TotalMinutes, 1)
+            Write-UpsEvent -EventId $EventId -EntryType Warning -Message "Fossibot: $Name. $Detail"
+            Send-UpsEmail -Subject "PROBLEM -- $Name" -Body ("$Detail" + "`r`n`r`n" +
+                "Since:  " + $p.Since.ToString("yyyy-MM-dd HH:mm:ss") + " ($mins min)" + "`r`n" +
+                "UPS shutdown protection is NOT active while this persists.")
+            $p.LastAlert = $now
+        }
+    } elseif ($null -ne $p) {
+        $mins = [math]::Round(($now - $p.Since).TotalMinutes, 1)
+        $script:Problems.Remove($Name)
+        if ($null -ne $p.LastAlert) {
+            Write-UpsEvent -EventId ($EventId + 100) -EntryType Information -Message "Fossibot: $Name cleared after $mins min."
+            Send-UpsEmail -Subject "RESOLVED -- $Name" -Body "$Name cleared after $mins minutes."
+        }
     }
 }
 
@@ -146,6 +192,8 @@ try {
 # ---------------------------------------------------------------------------
 
 $consecutiveFailures = 0
+$disconnectedPolls   = 0
+$lastEventSeq        = -1    # -1 = not yet synced; skip history on first poll
 $inputLostSince      = $null
 $shutdownInitiated   = $false
 
@@ -169,18 +217,64 @@ while (-not $shutdownInitiated) {
         Write-Warning ("API poll failed (" + $consecutiveFailures + "/" + $MaxConsecutiveFailures + "): " + $_)
         if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
             Write-Warning "Fossibot bridge unreachable for $consecutiveFailures consecutive polls"
-            Write-UpsEvent -EventId 1002 -EntryType Warning -Message "Fossibot telemetry bridge unreachable for $consecutiveFailures polls."
+            Update-Problem -Name "Telemetry bridge unreachable" -Active $true -EventId 1002 `
+                -Detail "The Fossibot telemetry bridge at $ApiUrl has not answered for $consecutiveFailures polls. Last error: $_"
+            # Fail safe: if we were already on battery, don't keep running blind
+            if ($null -ne $inputLostSince) {
+                Invoke-GracefulShutdown -Reason "Telemetry bridge lost while on battery (AC absent since $($inputLostSince.ToString('HH:mm:ss')))"
+                $shutdownInitiated = $true
+                break
+            }
         }
         Start-Sleep -Seconds $PollIntervalSeconds
         continue
     }
+    Update-Problem -Name "Telemetry bridge unreachable" -Active $false -EventId 1002
 
-    # Check device connected
+    # Forward device events (faults, SOC jumps, unknown frames) from the bridge.
+    # Older bridges have no /events endpoint; ignore failures here.
+    if ($null -ne $data._last_event_seq) {
+        if ($lastEventSeq -lt 0 -or [int]$data._last_event_seq -lt $lastEventSeq) {
+            $lastEventSeq = [int]$data._last_event_seq   # first poll or bridge restarted
+        } elseif ([int]$data._last_event_seq -gt $lastEventSeq) {
+            try {
+                $evUrl  = "http://${PiAddress}:${Port}/events?since=$lastEventSeq"
+                $events = (Invoke-WebRequest -Uri $evUrl -TimeoutSec 10 -UseBasicParsing).Content | ConvertFrom-Json
+                foreach ($ev in $events.events) {
+                    $lastEventSeq = [math]::Max($lastEventSeq, [int]$ev.seq)
+                    Write-Host ("Bridge event: " + $ev.time + " " + $ev.kind + " " + $ev.message)
+                    if ($ev.kind -in @("fault", "soc_jump", "frame")) {
+                        Write-UpsEvent -EventId 1006 -EntryType Warning -Message ("Fossibot " + $ev.kind + ": " + $ev.message)
+                        Send-UpsEmail -Subject ("DEVICE " + $ev.kind.ToUpper() + " -- " + $ev.message) `
+                            -Body ("Time:    " + $ev.time + "`r`nKind:    " + $ev.kind + "`r`nMessage: " + $ev.message + "`r`nData:    " + $ev.data)
+                    }
+                }
+            } catch {
+                Write-Warning "Failed to read bridge events: $_"
+            }
+        }
+    }
+
+    # Check device connected (bridge reports false when data is stale too)
     if (-not $data._connected) {
-        Write-Warning "Bridge reachable but Fossibot device not connected"
+        $disconnectedPolls++
+        Write-Warning "Bridge reachable but Fossibot device not connected ($disconnectedPolls)"
+        if ($disconnectedPolls -ge $MaxDisconnectedPolls) {
+            Update-Problem -Name "Fossibot device not connected" -Active $true -EventId 1007 `
+                -Detail ("The bridge is up but the Fossibot has not sent data for " + $data._seconds_since_update +
+                         " seconds. The power station may be off, faulted, or off WiFi.")
+            # Fail safe: if we were already on battery, don't keep running blind
+            if ($null -ne $inputLostSince) {
+                Invoke-GracefulShutdown -Reason "Fossibot telemetry lost while on battery (AC absent since $($inputLostSince.ToString('HH:mm:ss')))"
+                $shutdownInitiated = $true
+                break
+            }
+        }
         Start-Sleep -Seconds $PollIntervalSeconds
         continue
     }
+    $disconnectedPolls = 0
+    Update-Problem -Name "Fossibot device not connected" -Active $false -EventId 1007
 
     $soc         = [int]$data.soc
     $acInput     = [int]$data.ac_input_power
@@ -206,7 +300,8 @@ while (-not $shutdownInitiated) {
                          "AC output load:    ${acOutput}W" + "`r`n" +
                          "Runtime remaining: ${runtimeHrs} hours" + "`r`n`r`n" +
                          "Grace period: $InputLostGracePeriodSeconds seconds." + "`r`n" +
-                         "If AC is not restored and SOC drops below $InputLostSocThreshold%, the host will shut down."
+                         "If AC is not restored, the host will shut down when SOC drops below $InputLostSocThreshold%" + "`r`n" +
+                         "or after $MaxOnBatteryMinutes minutes on battery, whichever comes first."
 
             Send-UpsEmail -Subject "POWER OUTAGE -- AC input lost (SOC $soc%)" -Body $emailBody
         }
@@ -215,6 +310,12 @@ while (-not $shutdownInitiated) {
 
         if ($lostSeconds -ge $InputLostGracePeriodSeconds -and $soc -le $InputLostSocThreshold) {
             Invoke-GracefulShutdown -Reason "AC absent ${lostSeconds}s, SOC=$soc% (<= $InputLostSocThreshold%)"
+            $shutdownInitiated = $true
+            break
+        }
+
+        if ($lostSeconds -ge ($MaxOnBatteryMinutes * 60)) {
+            Invoke-GracefulShutdown -Reason "AC absent ${lostSeconds}s (>= $MaxOnBatteryMinutes min on battery), SOC reads $soc%"
             $shutdownInitiated = $true
             break
         }

@@ -7,9 +7,18 @@
 #   connects to us once it's on the same WiFi network.
 #
 #   The device sends a telemetry frame roughly every second.
-#   We ACK each frame, then parse it into state.py.
+#   We ACK each telemetry frame, then parse it into state.py.
 #
-#   Only one device connection is handled at a time (matching the app behaviour).
+#   If the device reconnects (e.g. after a WiFi drop) the newest connection
+#   wins; the stale connection's thread is not allowed to mark the device
+#   disconnected (see DeviceState connection tokens).
+#
+# Wire format (all little-endian uint16):
+#   [total_len][frame_type][payload_len][payload ...]
+#   total_len == payload_len + 6. Telemetry is type 0x000b, 224 bytes.
+#   Any other type is logged with a hex dump and recorded as an event so we
+#   can learn what the device sends (alarms, state changes) instead of
+#   silently discarding it.
 
 import socket
 import threading
@@ -17,7 +26,7 @@ import time
 import logging
 
 import config
-from parser import parse_frame
+from parser import parse_frame, frame_to_hex_dump
 from state import device_state
 
 log = logging.getLogger(__name__)
@@ -28,24 +37,43 @@ RECV_TIMEOUT = 2.0
 # Receive buffer — frames are typically 200-400 bytes but allow headroom
 RECV_BUFFER = 4096
 
+HEADER_LEN = 6
+MAX_FRAME_LEN = 2048
+TELEMETRY_TYPE = 0x000B
+
+
+def _capture(direction: str, data: bytes):
+    """Append raw bytes to RAW_CAPTURE_PATH (if set) for protocol discovery."""
+    if not config.RAW_CAPTURE_PATH:
+        return
+    try:
+        with open(config.RAW_CAPTURE_PATH, "a") as f:
+            f.write(f"{time.time():.3f} {direction} {data.hex()}\n")
+    except OSError as e:
+        log.debug(f"Raw capture write failed: {e}")
+
 
 def _handle_client(conn: socket.socket, addr):
     """Runs in its own thread for each connected device."""
     log.info(f"Device connected: {addr}")
-    device_state.set_connected(str(addr))
+    token = device_state.set_connected(str(addr))
 
     conn.settimeout(RECV_TIMEOUT)
     buf = bytearray()
+    last_rx = time.time()
 
     try:
         while True:
             try:
                 chunk = conn.recv(RECV_BUFFER)
             except socket.timeout:
-                # Check if device has gone silent too long
-                age = device_state.seconds_since_update()
-                if age is not None and age > config.DEVICE_TIMEOUT_SECONDS:
-                    log.warning(f"Device silent for {age:.0f}s — closing connection")
+                # Check if this connection has gone silent too long
+                silent = time.time() - last_rx
+                if silent > config.DEVICE_TIMEOUT_SECONDS:
+                    log.warning(f"Device silent for {silent:.0f}s — closing connection")
+                    break
+                if not device_state.is_current(token):
+                    log.info(f"Superseded by a newer connection — closing {addr}")
                     break
                 continue
             except OSError as e:
@@ -56,13 +84,22 @@ def _handle_client(conn: socket.socket, addr):
                 log.info("Device closed connection")
                 break
 
+            last_rx = time.time()
+            _capture("rx", chunk)
             buf.extend(chunk)
 
-            frames_parsed = _extract_frames(buf)
-            for frame in frames_parsed:
+            for ftype, frame in _extract_frames(buf):
+                if ftype != TELEMETRY_TYPE:
+                    log.warning(
+                        f"Non-telemetry frame type 0x{ftype:04x} ({len(frame)} bytes):\n"
+                        + frame_to_hex_dump(frame)
+                    )
+                    device_state.record_event("frame", f"type 0x{ftype:04x}", frame.hex())
+                    continue
+
                 parsed = parse_frame(frame)
                 if parsed:
-                    device_state.update(parsed)
+                    device_state.update(parsed, token)
                     log.debug(f"Updated {len(parsed)} registers")
                 else:
                     log.warning("Frame parsed 0 registers — possible format mismatch")
@@ -75,44 +112,41 @@ def _handle_client(conn: socket.socket, addr):
 
     finally:
         conn.close()
-        device_state.set_disconnected()
+        device_state.set_disconnected(token)
         log.info(f"Connection from {addr} closed")
-
-
-FRAME_MARKER = bytes([0xe0, 0x00])
-FRAME_LENGTH = 224  # observed fixed frame size from device
 
 
 def _extract_frames(buf: bytearray) -> list:
     """
-    Extract complete frames from the receive buffer (in place).
-    Returns list of complete frame bytes; modifies buf to remove them.
+    Extract complete length-prefixed frames from the receive buffer (in place).
+    Returns list of (frame_type, frame_bytes); modifies buf to remove them.
 
-    Frame start marker: e0 00 (first two bytes).
-    Each frame is exactly 224 bytes.
+    A header is valid when total_len == payload_len + 6 and total_len is sane.
+    On an invalid header we drop one byte and rescan, so the stream resyncs
+    after garbage or a partial frame.
     """
     frames = []
 
-    while True:
-        start = buf.find(FRAME_MARKER)
-        if start == -1:
-            if len(buf) > RECV_BUFFER // 2:
-                log.debug(f"No frame marker, discarding {len(buf)} bytes")
-                buf.clear()
-            break
+    while len(buf) >= HEADER_LEN:
+        total_len = buf[0] | (buf[1] << 8)
+        ftype = buf[2] | (buf[3] << 8)
+        payload_len = buf[4] | (buf[5] << 8)
 
-        if start > 0:
-            log.debug(f"Discarding {start} leading bytes")
-            del buf[:start]
+        if total_len != payload_len + HEADER_LEN or not HEADER_LEN < total_len <= MAX_FRAME_LEN:
+            log.debug(f"Bad header {bytes(buf[:HEADER_LEN]).hex()}, resyncing")
+            del buf[0]
+            continue
 
-        if len(buf) < FRAME_LENGTH:
+        if len(buf) < total_len:
             # Not enough data yet — wait for more
             break
 
-        # Extract exactly one frame
-        frame = bytes(buf[:FRAME_LENGTH])
-        del buf[:FRAME_LENGTH]
-        frames.append(frame)
+        frames.append((ftype, bytes(buf[:total_len])))
+        del buf[:total_len]
+
+    if len(buf) > MAX_FRAME_LEN * 2:
+        log.debug(f"Discarding {len(buf)} unframed bytes")
+        buf.clear()
 
     return frames
 
@@ -127,6 +161,9 @@ class TcpServer:
         self._thread = threading.Thread(target=self._run, daemon=True, name="tcp-server")
         self._thread.start()
         log.info(f"TCP server starting on port {config.TCP_LISTEN_PORT}")
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def stop(self):
         self._stop_event.set()
@@ -154,7 +191,9 @@ class TcpServer:
                     except OSError:
                         break
 
-                    # Handle client in its own thread (only one at a time expected)
+                    # Enable keepalive so a half-open connection is noticed by the kernel too
+                    conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
                     t = threading.Thread(
                         target=_handle_client,
                         args=(conn, addr),
@@ -163,7 +202,7 @@ class TcpServer:
                     )
                     t.start()
 
-            except OSError as e:
+            except Exception as e:
                 log.error(f"TCP server error: {e} — retrying in 5s")
                 time.sleep(5)
             finally:

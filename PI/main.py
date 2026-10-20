@@ -73,6 +73,13 @@ def main():
     while True:
         time.sleep(1)
         now = time.time()
+
+        # If the TCP listener thread has died we are useless — exit so
+        # systemd restarts us rather than serving stale data forever
+        if not tcp.is_alive():
+            log.error("TCP server thread died — exiting for restart")
+            os._exit(1)
+
         if now - last_status >= 30:
             last_status = now
             age = device_state.seconds_since_update()
@@ -80,12 +87,15 @@ def main():
             soc = device_state.get("soc")
             input_w = device_state.get("total_input_power")
             output_w = device_state.get("total_output_power")
+            pack_v = device_state.get("pack_voltage")
+            current = device_state.get("current_ma")
 
             if connected and soc is not None:
                 log.info(
                     f"[heartbeat] connected  SOC={soc}%  "
                     f"in={input_w}W  out={output_w}W  "
-                    f"age={age:.0f}s"
+                    f"pack={pack_v / 10 if pack_v is not None else '?'}V  "
+                    f"I={current}mA  age={age:.0f}s"
                 )
             elif connected:
                 log.info(f"[heartbeat] connected, no data yet  age={age}s")
